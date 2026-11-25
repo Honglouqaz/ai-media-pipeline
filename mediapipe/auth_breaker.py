@@ -11,6 +11,7 @@
 import json
 import os
 import time
+import threading
 from dataclasses import dataclass, asdict, field
 
 OK, FAILING, BLOCKED = "ok", "failing", "blocked"
@@ -44,6 +45,8 @@ class AuthBreaker:
         self.threshold = threshold
         self.cool_seconds = cool_seconds
         self.lanes = {}
+        self._lock = threading.RLock()
+        self._half_open_inflight = set()
         self._load()
 
     # ---------- 持久化 ----------
@@ -80,42 +83,54 @@ class AuthBreaker:
 
     # ---------- 状态流转 ----------
     def can_run(self, name, now=None) -> tuple:
-        """返回 (是否放行, 原因)"""
-        st = self.lane(name)
-        now = time.time() if now is None else now
-        if st.is_blocked(now):
-            return False, f"熔断中，剩余 {st.seconds_left(now)}s（上次：{st.last_reason}）"
-        if st.status == BLOCKED and now >= st.blocked_until:
-            st.status = FAILING        # 半开：允许试探一次
-            st.fail_count = self.threshold - 1
-            self.save()
-        return True, "ok"
+        """返回 (是否放行, 原因)；同一实例内半开阶段只放行一个探测请求。"""
+        with self._lock:
+            st = self.lane(name)
+            now = time.time() if now is None else now
+            if st.is_blocked(now):
+                return False, f"熔断中，剩余 {st.seconds_left(now)}s（上次：{st.last_reason}）"
+            if st.status == BLOCKED and now >= st.blocked_until:
+                if name in self._half_open_inflight:
+                    return False, "半开探测进行中"
+                self._half_open_inflight.add(name)
+                st.status = FAILING
+                st.fail_count = self.threshold - 1
+                self.save()
+            elif name in self._half_open_inflight:
+                return False, "半开探测进行中"
+            return True, "ok"
 
     def record_ok(self, name, now=None):
-        st = self.lane(name)
-        now = time.time() if now is None else now
-        st.status, st.fail_count, st.last_ok_ts, st.blocked_until = OK, 0, now, 0.0
-        st.history = (st.history + [[now, True, ""]])[-20:]
-        self.save()
+        with self._lock:
+            st = self.lane(name)
+            now = time.time() if now is None else now
+            st.status, st.fail_count, st.last_ok_ts, st.blocked_until = OK, 0, now, 0.0
+            st.history = (st.history + [[now, True, ""]])[-20:]
+            self._half_open_inflight.discard(name)
+            self.save()
 
     def record_fail(self, name, reason="", now=None):
-        st = self.lane(name)
-        now = time.time() if now is None else now
-        st.fail_count += 1
-        st.last_fail_ts, st.last_reason = now, reason[:200]
-        st.history = (st.history + [[now, False, st.last_reason]])[-20:]
-        if st.fail_count >= self.threshold:
-            st.status = BLOCKED
-            st.blocked_until = now + self.cool_seconds
-        else:
-            st.status = FAILING
-        self.save()
-        return st
+        with self._lock:
+            st = self.lane(name)
+            now = time.time() if now is None else now
+            st.fail_count += 1
+            st.last_fail_ts, st.last_reason = now, reason[:200]
+            st.history = (st.history + [[now, False, st.last_reason]])[-20:]
+            if st.fail_count >= self.threshold:
+                st.status = BLOCKED
+                st.blocked_until = now + self.cool_seconds
+            else:
+                st.status = FAILING
+            self._half_open_inflight.discard(name)
+            self.save()
+            return st
 
     def reset(self, name):
-        st = self.lane(name)
-        st.status, st.fail_count, st.blocked_until, st.last_reason = OK, 0, 0.0, ""
-        self.save()
+        with self._lock:
+            st = self.lane(name)
+            st.status, st.fail_count, st.blocked_until, st.last_reason = OK, 0, 0.0, ""
+            self._half_open_inflight.discard(name)
+            self.save()
 
     def report(self, now=None) -> list:
         now = time.time() if now is None else now

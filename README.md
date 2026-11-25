@@ -25,7 +25,7 @@
 
 ```bash
 git clone <this-repo> && cd ai-media-pipeline
-python3 -m unittest discover -s tests -v      # 零依赖，13 个用例
+python3 -m unittest discover -s tests -v      # 零依赖，新增并发/异常边界测试（以 CI 实际结果为准）
 ```
 
 ```bash
@@ -46,7 +46,7 @@ python3 -m mediapipe.cli receipt audit --day 20260101 --lanes wechat,bilibili,do
 python3 -m mediapipe.cli typo render < draft.md > ready.md
 ```
 
-## 几个刻意的设计
+## 兼容性与测试\n\n- 当前代码保持零第三方依赖，建议使用 Python 3.9–3.13。\n- GitHub Actions 会在上述版本矩阵中运行 `python -m unittest discover -s tests -v`。\n- 登录熔断器的半开单探测保证在同一个 `AuthBreaker` 实例内有效；多进程共享状态文件时仍需外部协调，不应视为分布式锁。\n- 回执写入通过单次 append 系统调用写入一条 JSONL 记录；同进程线程使用路径级锁。\n\n## 几个刻意的设计
 
 **闸门不能自己变成故障点。** `asset_gate` 的退出码永远 0，内部异常一律吞掉只打日志。
 原因很实在：如果闸门失败会阻止发布，那么"今天什么都没发"的概率会大幅上升 ——

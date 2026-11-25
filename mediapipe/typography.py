@@ -73,5 +73,16 @@ def normalize_punct(text: str) -> str:
 
 
 def render(text: str) -> str:
-    """完整流水线：全角规范 → 数字加粗 → 结论引用 → 长段切分"""
-    return split_long_paragraphs(lead_to_quote(bold_numbers(normalize_punct(text))))
+    """完整流水线；围栏代码块原样保护，不对代码内容做中文排版。"""
+    protected = []
+    def mask_code(match):
+        protected.append(match.group(0))
+        return f"\x00CODEBLOCK{len(protected) - 1}\x00"
+
+    # Support both backtick and tilde fenced blocks, including language labels.
+    pattern = re.compile(r"(?ms)^ {0,3}(`{3,}|~{3,})[^\\n]*\\n.*?^ {0,3}\\1[^\\n]*(?:\\n|$)")
+    masked = pattern.sub(mask_code, text)
+    rendered = split_long_paragraphs(lead_to_quote(bold_numbers(normalize_punct(masked))))
+    for index, block in enumerate(protected):
+        rendered = rendered.replace(f"\x00CODEBLOCK{index}\x00", block)
+    return rendered
