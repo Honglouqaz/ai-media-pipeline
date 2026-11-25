@@ -25,7 +25,7 @@
 
 ```bash
 git clone <this-repo> && cd ai-media-pipeline
-python3 -m unittest discover -s tests -v      # 零依赖，13 个用例
+python3 -m unittest discover -s tests -v      # 零依赖，新增并发/异常边界测试（以 CI 实际结果为准）
 ```
 
 ```bash
@@ -45,6 +45,13 @@ python3 -m mediapipe.cli receipt audit --day 20260101 --lanes wechat,bilibili,do
 # 4) 排版
 python3 -m mediapipe.cli typo render < draft.md > ready.md
 ```
+
+## 兼容性与测试
+
+- 当前代码保持零第三方依赖，建议使用 Python 3.9–3.13。
+- GitHub Actions 会在上述版本矩阵中运行 `python -m unittest discover -s tests -v`。
+- 登录熔断器的半开单探测保证在同一个 `AuthBreaker` 实例内有效；多进程共享状态文件时仍需外部协调，不应视为分布式锁。
+- 回执写入通过单次 append 系统调用写入一条 JSONL 记录；同进程线程使用路径级锁。
 
 ## 几个刻意的设计
 

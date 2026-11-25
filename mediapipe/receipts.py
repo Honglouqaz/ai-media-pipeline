@@ -10,7 +10,18 @@
 import json
 import os
 import time
+import threading
 from dataclasses import dataclass, asdict
+
+_WRITE_LOCKS = {}
+_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _write_lock(path):
+    key = os.path.abspath(path)
+    with _WRITE_LOCKS_GUARD:
+        return _WRITE_LOCKS.setdefault(key, threading.Lock())
+
 
 POSTED, PENDING, FAILED = "posted", "pending", "failed"
 
@@ -22,11 +33,11 @@ class Receipt:
     item: str                 # 内容标识（本地文件名或稿件 id）
     status: str = PENDING
     remote_id: str = ""       # 平台返回的 id / url，是「真的发出去了」的硬证据
-    ts: float = 0.0
+    ts: float = None
     note: str = ""
 
     def __post_init__(self):
-        if not self.ts:
+        if self.ts is None:
             self.ts = time.time()
 
 
@@ -36,8 +47,17 @@ class ReceiptBook:
 
     def add(self, r: Receipt):
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(asdict(r), ensure_ascii=False) + "\n")
+        payload = (json.dumps(asdict(r), ensure_ascii=False) + "\n").encode("utf-8")
+        # One append syscall per JSONL record avoids Python text-buffer interleaving.
+        # The process-local lock also serializes threads sharing this path.
+        with _write_lock(self.path):
+            fd = os.open(self.path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o666)
+            try:
+                written = os.write(fd, payload)
+                if written != len(payload):
+                    raise OSError("incomplete JSONL append")
+            finally:
+                os.close(fd)
 
     def load(self, day=None) -> list:
         if not os.path.exists(self.path):
@@ -51,7 +71,9 @@ class ReceiptBook:
                 continue
             try:
                 d = json.loads(line)
-            except Exception:
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(d, dict):
                 continue
             if day and d.get("day") != day:
                 continue

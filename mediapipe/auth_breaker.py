@@ -11,6 +11,7 @@
 import json
 import os
 import time
+import threading
 from dataclasses import dataclass, asdict, field
 
 OK, FAILING, BLOCKED = "ok", "failing", "blocked"
@@ -28,11 +29,11 @@ class LaneState:
     history: list = field(default_factory=list)   # [(ts, ok, reason)] 只留最近 20 条
 
     def is_blocked(self, now=None) -> bool:
-        now = now or time.time()
+        now = time.time() if now is None else now
         return self.status == BLOCKED and now < self.blocked_until
 
     def seconds_left(self, now=None) -> int:
-        now = now or time.time()
+        now = time.time() if now is None else now
         return max(0, int(self.blocked_until - now))
 
 
@@ -44,6 +45,8 @@ class AuthBreaker:
         self.threshold = threshold
         self.cool_seconds = cool_seconds
         self.lanes = {}
+        self._lock = threading.RLock()
+        self._half_open_inflight = set()
         self._load()
 
     # ---------- 持久化 ----------
@@ -59,54 +62,78 @@ class AuthBreaker:
 
     def save(self):
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({k: asdict(v) for k, v in self.lanes.items()},
-                      f, ensure_ascii=False, indent=1)
+        # Replace atomically so an interrupted write does not truncate the last
+        # known-good state file. Keep the temporary file beside the target so
+        # os.replace stays on the same filesystem.
+        tmp_path = self.path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump({k: asdict(v) for k, v in self.lanes.items()},
+                          f, ensure_ascii=False, indent=1)
+            os.replace(tmp_path, self.path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     def lane(self, name) -> LaneState:
         return self.lanes.setdefault(name, LaneState(lane=name))
 
     # ---------- 状态流转 ----------
     def can_run(self, name, now=None) -> tuple:
-        """返回 (是否放行, 原因)"""
-        st = self.lane(name)
-        now = now or time.time()
-        if st.is_blocked(now):
-            return False, f"熔断中，剩余 {st.seconds_left(now)}s（上次：{st.last_reason}）"
-        if st.status == BLOCKED and now >= st.blocked_until:
-            st.status = FAILING        # 半开：允许试探一次
-            st.fail_count = self.threshold - 1
-            self.save()
-        return True, "ok"
+        """返回 (是否放行, 原因)；同一实例内半开阶段只放行一个探测请求。"""
+        with self._lock:
+            st = self.lane(name)
+            now = time.time() if now is None else now
+            if st.is_blocked(now):
+                return False, f"熔断中，剩余 {st.seconds_left(now)}s（上次：{st.last_reason}）"
+            if st.status == BLOCKED and now >= st.blocked_until:
+                if name in self._half_open_inflight:
+                    return False, "半开探测进行中"
+                self._half_open_inflight.add(name)
+                st.status = FAILING
+                st.fail_count = self.threshold - 1
+                self.save()
+            elif name in self._half_open_inflight:
+                return False, "半开探测进行中"
+            return True, "ok"
 
     def record_ok(self, name, now=None):
-        st = self.lane(name)
-        now = now or time.time()
-        st.status, st.fail_count, st.last_ok_ts, st.blocked_until = OK, 0, now, 0.0
-        st.history = (st.history + [[now, True, ""]])[-20:]
-        self.save()
+        with self._lock:
+            st = self.lane(name)
+            now = time.time() if now is None else now
+            st.status, st.fail_count, st.last_ok_ts, st.blocked_until = OK, 0, now, 0.0
+            st.history = (st.history + [[now, True, ""]])[-20:]
+            self._half_open_inflight.discard(name)
+            self.save()
 
     def record_fail(self, name, reason="", now=None):
-        st = self.lane(name)
-        now = now or time.time()
-        st.fail_count += 1
-        st.last_fail_ts, st.last_reason = now, reason[:200]
-        st.history = (st.history + [[now, False, st.last_reason]])[-20:]
-        if st.fail_count >= self.threshold:
-            st.status = BLOCKED
-            st.blocked_until = now + self.cool_seconds
-        else:
-            st.status = FAILING
-        self.save()
-        return st
+        with self._lock:
+            st = self.lane(name)
+            now = time.time() if now is None else now
+            st.fail_count += 1
+            st.last_fail_ts, st.last_reason = now, reason[:200]
+            st.history = (st.history + [[now, False, st.last_reason]])[-20:]
+            if st.fail_count >= self.threshold:
+                st.status = BLOCKED
+                st.blocked_until = now + self.cool_seconds
+            else:
+                st.status = FAILING
+            self._half_open_inflight.discard(name)
+            self.save()
+            return st
 
     def reset(self, name):
-        st = self.lane(name)
-        st.status, st.fail_count, st.blocked_until, st.last_reason = OK, 0, 0.0, ""
-        self.save()
+        with self._lock:
+            st = self.lane(name)
+            st.status, st.fail_count, st.blocked_until, st.last_reason = OK, 0, 0.0, ""
+            self._half_open_inflight.discard(name)
+            self.save()
 
     def report(self, now=None) -> list:
-        now = now or time.time()
+        now = time.time() if now is None else now
         out = []
         for k in sorted(self.lanes):
             st = self.lanes[k]

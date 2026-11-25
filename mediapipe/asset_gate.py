@@ -50,12 +50,22 @@ def count_from_manifest(manifest_path) -> Coverage:
     if not os.path.exists(manifest_path):
         return Coverage(0, 0)
     try:
-        data = json.load(open(manifest_path, encoding="utf-8"))
-    except Exception:
+        with open(manifest_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return Coverage(0, 0)
-    segs = data.get("segments") or []
+    if not isinstance(data, dict):
+        return Coverage(0, 0)
+    segs = data.get("segments")
+    if not isinstance(segs, list):
+        return Coverage(0, 0)
     total = len(segs)
-    got = sum(1 for s in segs if (s.get("asset") or "").strip())
+    got = sum(
+        1 for segment in segs
+        if isinstance(segment, dict)
+        and isinstance(segment.get("asset"), str)
+        and segment["asset"].strip()
+    )
     return Coverage(total, got)
 
 
