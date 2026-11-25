@@ -44,6 +44,11 @@ class TestAuthBreaker(unittest.TestCase):
         br2 = AuthBreaker(self.path, threshold=2)
         self.assertEqual(br2.lane("y").fail_count, 1)
 
+    def test_零时间戳不会被替换为当前时间(self):
+        self.br.record_fail("epoch", "test", now=0)
+        self.assertEqual(self.br.lane("epoch").last_fail_ts, 0)
+        self.assertTrue(self.br.can_run("epoch", now=0)[0])
+
 
 class TestAssetGate(unittest.TestCase):
     def setUp(self):
@@ -63,6 +68,13 @@ class TestAssetGate(unittest.TestCase):
         p = os.path.join(self.tmp, "m2.json")
         json.dump({"segments": [{"id": i, "asset": None} for i in range(10)]}, open(p, "w"))
         self.assertEqual(count_from_manifest(p).level(), "alert")
+
+    def test_清单结构异常不抛异常(self):
+        p = os.path.join(self.tmp, "bad.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"segments": [None, "bad", {"asset": 123}, {"asset": "ok.png"}]}, f)
+        cov = count_from_manifest(p)
+        self.assertEqual((cov.total, cov.with_asset), (4, 1))
 
     def test_日志解析_永不抛异常(self):
         p = os.path.join(self.tmp, "r.log")

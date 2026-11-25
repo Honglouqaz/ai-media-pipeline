@@ -28,11 +28,11 @@ class LaneState:
     history: list = field(default_factory=list)   # [(ts, ok, reason)] 只留最近 20 条
 
     def is_blocked(self, now=None) -> bool:
-        now = now or time.time()
+        now = time.time() if now is None else now
         return self.status == BLOCKED and now < self.blocked_until
 
     def seconds_left(self, now=None) -> int:
-        now = now or time.time()
+        now = time.time() if now is None else now
         return max(0, int(self.blocked_until - now))
 
 
@@ -59,9 +59,21 @@ class AuthBreaker:
 
     def save(self):
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({k: asdict(v) for k, v in self.lanes.items()},
-                      f, ensure_ascii=False, indent=1)
+        # Replace atomically so an interrupted write does not truncate the last
+        # known-good state file. Keep the temporary file beside the target so
+        # os.replace stays on the same filesystem.
+        tmp_path = self.path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump({k: asdict(v) for k, v in self.lanes.items()},
+                          f, ensure_ascii=False, indent=1)
+            os.replace(tmp_path, self.path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     def lane(self, name) -> LaneState:
         return self.lanes.setdefault(name, LaneState(lane=name))
@@ -70,7 +82,7 @@ class AuthBreaker:
     def can_run(self, name, now=None) -> tuple:
         """返回 (是否放行, 原因)"""
         st = self.lane(name)
-        now = now or time.time()
+        now = time.time() if now is None else now
         if st.is_blocked(now):
             return False, f"熔断中，剩余 {st.seconds_left(now)}s（上次：{st.last_reason}）"
         if st.status == BLOCKED and now >= st.blocked_until:
@@ -81,14 +93,14 @@ class AuthBreaker:
 
     def record_ok(self, name, now=None):
         st = self.lane(name)
-        now = now or time.time()
+        now = time.time() if now is None else now
         st.status, st.fail_count, st.last_ok_ts, st.blocked_until = OK, 0, now, 0.0
         st.history = (st.history + [[now, True, ""]])[-20:]
         self.save()
 
     def record_fail(self, name, reason="", now=None):
         st = self.lane(name)
-        now = now or time.time()
+        now = time.time() if now is None else now
         st.fail_count += 1
         st.last_fail_ts, st.last_reason = now, reason[:200]
         st.history = (st.history + [[now, False, st.last_reason]])[-20:]
@@ -106,7 +118,7 @@ class AuthBreaker:
         self.save()
 
     def report(self, now=None) -> list:
-        now = now or time.time()
+        now = time.time() if now is None else now
         out = []
         for k in sorted(self.lanes):
             st = self.lanes[k]
