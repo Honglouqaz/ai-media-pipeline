@@ -80,7 +80,7 @@ def render(text: str) -> str:
         return f"\x00CODEBLOCK{len(protected) - 1}\x00"
 
     # Support both backtick and tilde fenced blocks, including language labels.
-    pattern = re.compile(r"(?ms)^ {0,3}(`{3,}|~{3,})[^\\n]*\\n.*?^ {0,3}\\1[^\\n]*(?:\\n|$)")
+    pattern = re.compile(r"(?ms)^ {0,3}(`{3,}|~{3,})[^\n]*\n.*?^ {0,3}\1[^\n]*(?:\n|$)")
     masked = pattern.sub(mask_code, text)
     rendered = split_long_paragraphs(lead_to_quote(bold_numbers(normalize_punct(masked))))
     for index, block in enumerate(protected):

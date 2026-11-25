@@ -143,7 +143,7 @@ class TestReceipts(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         path = os.path.join(tmp, "broken.jsonl")
         with open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps({"day": "20260101", "lane": "ok"}) + "\\n")
+            f.write(json.dumps({"day": "20260101", "lane": "ok"}) + "\n")
             f.write('{"broken":')
         self.assertEqual(len(ReceiptBook(path).load("20260101")), 1)
 
